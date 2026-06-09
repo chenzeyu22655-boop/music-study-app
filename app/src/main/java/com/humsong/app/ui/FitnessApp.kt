@@ -417,7 +417,7 @@ fun FitnessApp(
                     }
 
                     state.errorMessage?.let {
-                        ResultCard(title = "鎻愮ず", content = it)
+                        ResultCard(title = "AI总结", content = it)
                     }
                 }
             }
@@ -1011,7 +1011,7 @@ private fun DateCard(
                     visibleMonth = YearMonth.from(today)
                 }
             ) {
-                Text("鍥炲埌浠婂ぉ")
+                Text("回到今日")
             }
         }
     }
@@ -4036,7 +4036,7 @@ private fun MealNutritionChart(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "寤鸿",
+                            text = "建议",
                             modifier = Modifier.weight(1f),
                             fontWeight = FontWeight.Bold
                         )
@@ -4099,7 +4099,7 @@ private fun NutritionAnalysisList(content: String) {
                     .padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Text(text = "寤鸿", fontWeight = FontWeight.Bold)
+                Text(text = "建议", fontWeight = FontWeight.Bold)
                 Text(text = analysis.advice.ifBlank { "--" }, style = MaterialTheme.typography.bodyMedium)
             }
         }

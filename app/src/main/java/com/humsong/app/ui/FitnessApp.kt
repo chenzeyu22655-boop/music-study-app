@@ -417,7 +417,7 @@ fun FitnessApp(
                     }
 
                     state.errorMessage?.let {
-                        ResultCard(title = "鎻愮ず", content = it)
+                        ResultCard(title = "AI总结", content = it)
                     }
                 }
             }
@@ -1011,7 +1011,7 @@ private fun DateCard(
                     visibleMonth = YearMonth.from(today)
                 }
             ) {
-                Text("鍥炲埌浠婂ぉ")
+                Text("回到今日")
             }
         }
     }
@@ -4036,12 +4036,12 @@ private fun MealNutritionChart(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "寤鸿",
+                            text = "建议",
                             modifier = Modifier.weight(1f),
                             fontWeight = FontWeight.Bold
                         )
                         TextButton(onClick = { adviceExpanded = !adviceExpanded }) {
-                            Text(if (adviceExpanded) "鏀惰捣" else "灞曞紑")
+                            Text(if (adviceExpanded) "收起" else "展开")
                         }
                     }
                     if (adviceExpanded) {
@@ -4099,7 +4099,7 @@ private fun NutritionAnalysisList(content: String) {
                     .padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Text(text = "寤鸿", fontWeight = FontWeight.Bold)
+                Text(text = "建议", fontWeight = FontWeight.Bold)
                 Text(text = analysis.advice.ifBlank { "--" }, style = MaterialTheme.typography.bodyMedium)
             }
         }
@@ -4663,7 +4663,7 @@ private fun SettingsDrawer(
                             fontWeight = FontWeight.Bold
                         )
                         IconButton(onClick = onClose) {
-                            Text(text = "脳", style = MaterialTheme.typography.headlineSmall)
+                            Text(text = "×", style = MaterialTheme.typography.headlineSmall)
                         }
                     }
                     SettingsMenuItem(title = "个人资料", subtitle = "头像、姓名、生日、性别", onClick = { activeDialog = SettingsDialog.Profile })
@@ -5642,7 +5642,7 @@ private fun TrainingGroupTemplateEditorDialog(
                     modifier = Modifier.fillMaxWidth(),
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("闆嗗悎鍚嶇О") },
+                    label = { Text("集合名称") },
                     singleLine = true
                 )
                 OutlinedTextField(
@@ -5712,7 +5712,7 @@ private fun TrainingGroupTemplateEditorDialog(
                                 Text(text = "${template.category.ifBlank { "未分类" }} - ${template.item.summaryLabel()}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             TextButton(onClick = { selectedIds = selectedIds - template.id }) {
-                                Text("绉婚櫎")
+                                Text("移除")
                             }
                         }
                     }
@@ -5802,7 +5802,7 @@ private fun MealGroupTemplateEditorDialog(
                     modifier = Modifier.fillMaxWidth(),
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("闆嗗悎鍚嶇О") },
+                    label = { Text("集合名称") },
                     singleLine = true
                 )
                 OutlinedTextField(
@@ -5876,7 +5876,7 @@ private fun MealGroupTemplateEditorDialog(
                                 )
                             }
                             TextButton(onClick = { selectedIds = selectedIds - template.id }) {
-                                Text("绉婚櫎")
+                                Text("移除")
                             }
                         }
                     }
@@ -5983,7 +5983,7 @@ private fun ApiSettingsPanel(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SettingsPanel(
-            title = "MiMo 鎺ュ彛",
+            title = "MiMo 接口",
             subtitle = "API Key 只保存在本机，用于 AI 分析请求"
         ) {
             OutlinedTextField(
@@ -6349,11 +6349,11 @@ private fun AvatarImage(
             Image(
                 modifier = Modifier.fillMaxSize(),
                 painter = rememberAsyncImagePainter(File(avatarPath)),
-                contentDescription = "澶村儚",
+                contentDescription = "头像",
                 contentScale = ContentScale.Crop
             )
         } else {
-            Text(text = "澶村儚")
+            Text(text = "头像")
         }
     }
 }
@@ -6386,7 +6386,7 @@ private fun DrawerSectionHeader(
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold
         )
-        Text(text = if (expanded) "鏀惰捣" else "灞曞紑")
+        Text(text = if (expanded) "收起" else "展开")
     }
 }
 
@@ -6526,7 +6526,7 @@ private fun ComparisonImagePair(
             modifier = Modifier.weight(1f)
         )
         ComparisonImagePane(
-            label = "浠婃棩 ${result.currentDate}",
+            label = "今日 ${result.currentDate}",
             path = result.currentPhotoPath,
             fullscreen = fullscreen,
             modifier = Modifier.weight(1f)

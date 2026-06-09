@@ -1,5 +1,7 @@
 .gradle/
+.jdk/
 .idea/
+.codex/
 build/
 app/build/
 local.properties

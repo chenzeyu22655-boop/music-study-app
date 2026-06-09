@@ -1,11 +1,27 @@
 package com.humsong.app.fitness
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import java.io.File
 import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
+
+data class StorageUsage(
+    val recordsBytes: Long = 0L,
+    val bodyPhotoBytes: Long = 0L,
+    val tempBytes: Long = 0L,
+    val profileBytes: Long = 0L
+) {
+    val totalBytes: Long get() = recordsBytes + bodyPhotoBytes + tempBytes + profileBytes
+}
+
+data class StorageCleanupResult(
+    val freedBytes: Long = 0L,
+    val affectedCount: Int = 0
+)
 
 class FitnessRepository(private val context: Context) {
     private val preferences = context.getSharedPreferences("fitness_entries", Context.MODE_PRIVATE)
@@ -475,9 +491,8 @@ class FitnessRepository(private val context: Context) {
         val target = File(directory, "body_${date}_${angle.key}_${UUID.randomUUID()}.jpg")
         context.contentResolver.openInputStream(uri).use { input ->
             requireNotNull(input) { "无法读取选择的图片" }
-            target.outputStream().use { output ->
-                input.copyTo(output)
-            }
+            val bytes = input.readBytes()
+            writeCompressedImage(bytes, target)
         }
         deletePhoto(oldPath)
         return target.absolutePath
@@ -490,5 +505,126 @@ class FitnessRepository(private val context: Context) {
         if (target.path.startsWith(photoDirectory.path) && target.isFile) {
             target.delete()
         }
+    }
+
+    fun storageUsage(): StorageUsage {
+        val recordsBytes = preferences.all.values.sumOf { value ->
+            (value as? String)?.toByteArray(Charsets.UTF_8)?.size?.toLong() ?: 0L
+        }
+        return StorageUsage(
+            recordsBytes = recordsBytes,
+            bodyPhotoBytes = directorySize(File(context.filesDir, "body_photos")),
+            tempBytes = directorySize(File(context.cacheDir, "food_recognition")),
+            profileBytes = directorySize(File(context.filesDir, "profile"))
+        )
+    }
+
+    fun clearFoodRecognitionTempFiles(): StorageCleanupResult {
+        val directory = File(context.cacheDir, "food_recognition")
+        val before = directorySize(directory)
+        val count = directory.listFiles()?.count { it.isFile } ?: 0
+        directory.deleteRecursively()
+        directory.mkdirs()
+        return StorageCleanupResult(freedBytes = before, affectedCount = count)
+    }
+
+    fun compressAllBodyPhotos(): StorageCleanupResult {
+        val dates = recordedDates()
+        var freed = 0L
+        var count = 0
+        dates.forEach { date ->
+            val entry = load(date)
+            BodyPhotoAngle.entries.forEach { angle ->
+                val path = entry.photoPathFor(angle).orEmpty()
+                val file = File(path)
+                if (file.isFile && file.parentFile?.name == "body_photos") {
+                    val before = file.length()
+                    val bytes = file.readBytes()
+                    writeCompressedImage(bytes, file)
+                    val after = file.length()
+                    if (after < before) freed += before - after
+                    count += 1
+                }
+            }
+        }
+        return StorageCleanupResult(freedBytes = freed, affectedCount = count)
+    }
+
+    fun archiveLongAiText(maxLength: Int = 700): StorageCleanupResult {
+        var freed = 0L
+        var count = 0
+        recordedDates().forEach { date ->
+            val oldRaw = preferences.getString(date, null).orEmpty()
+            val entry = load(date)
+            val updated = entry.copy(
+                aiAnalysis = entry.aiAnalysis.archiveText(maxLength),
+                nutritionAnalysis = entry.nutritionAnalysis.archiveText(maxLength),
+                breakfastNutritionAnalysis = entry.breakfastNutritionAnalysis.archiveText(maxLength),
+                lunchNutritionAnalysis = entry.lunchNutritionAnalysis.archiveText(maxLength),
+                dinnerNutritionAnalysis = entry.dinnerNutritionAnalysis.archiveText(maxLength),
+                photoComparisonAnalysis = entry.photoComparisonAnalysis.archiveText(maxLength)
+            )
+            if (updated != entry) {
+                save(updated)
+                val newRaw = preferences.getString(date, null).orEmpty()
+                freed += (oldRaw.toByteArray(Charsets.UTF_8).size - newRaw.toByteArray(Charsets.UTF_8).size).coerceAtLeast(0).toLong()
+                count += 1
+            }
+        }
+        return StorageCleanupResult(freedBytes = freed, affectedCount = count)
+    }
+
+    fun writeCompressedImage(bytes: ByteArray, target: File) {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+        val longest = maxOf(options.outWidth, options.outHeight).coerceAtLeast(1)
+        val sampleSize = calculateInSampleSize(longest, 1600)
+        val bitmap = BitmapFactory.decodeByteArray(
+            bytes,
+            0,
+            bytes.size,
+            BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        )
+        if (bitmap == null) {
+            target.writeBytes(bytes)
+            return
+        }
+        val scaled = bitmap.scaleDownToMaxSide(1600)
+        target.outputStream().use { output ->
+            scaled.compress(Bitmap.CompressFormat.JPEG, 82, output)
+        }
+        if (scaled !== bitmap) scaled.recycle()
+        bitmap.recycle()
+    }
+
+    private fun calculateInSampleSize(longest: Int, target: Int): Int {
+        var sample = 1
+        while (longest / sample > target * 2) sample *= 2
+        return sample
+    }
+
+    private fun Bitmap.scaleDownToMaxSide(maxSide: Int): Bitmap {
+        val longest = maxOf(width, height)
+        if (longest <= maxSide) return this
+        val ratio = maxSide.toFloat() / longest.toFloat()
+        val nextWidth = (width * ratio).toInt().coerceAtLeast(1)
+        val nextHeight = (height * ratio).toInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(this, nextWidth, nextHeight, true)
+    }
+
+    private fun directorySize(directory: File): Long {
+        if (!directory.exists()) return 0L
+        return directory.walkTopDown()
+            .filter { it.isFile }
+            .sumOf { it.length() }
+    }
+
+    private fun String.archiveText(maxLength: Int): String {
+        val cleaned = lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .joinToString("\n")
+        if (cleaned.length <= maxLength) return this
+        return "【已归档摘要】\n" + cleaned.take(maxLength).trimEnd() + "\n..."
     }
 }

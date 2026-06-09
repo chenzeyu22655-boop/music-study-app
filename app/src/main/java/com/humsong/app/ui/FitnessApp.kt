@@ -129,6 +129,7 @@ import com.humsong.app.fitness.MealItem
 import com.humsong.app.fitness.MealTemplate
 import com.humsong.app.fitness.MealTemplateGroup
 import com.humsong.app.fitness.MealType
+import com.humsong.app.fitness.StorageUsage
 import com.humsong.app.fitness.TrainingItem
 import com.humsong.app.fitness.TrainingTemplate
 import com.humsong.app.fitness.TrainingTemplateGroup
@@ -465,6 +466,8 @@ fun FitnessApp(
             mealTemplates = state.mealTemplates,
             mealTemplateGroups = state.mealTemplateGroups,
             canEditSelectedDate = state.canEditSelectedDate,
+            storageUsage = state.storageUsage,
+            isManagingStorage = state.isManagingStorage,
             onApiKeyChange = viewModel::updateApiKey,
             onSaveApiKey = viewModel::saveApiKey,
             onProfileNameChange = viewModel::updateProfileName,
@@ -509,6 +512,10 @@ fun FitnessApp(
             onSaveMealTemplateGroup = viewModel::saveMealTemplateGroup,
             onUpdateMealTemplateGroup = viewModel::updateMealTemplateGroup,
             onDeleteMealTemplateGroup = viewModel::deleteMealTemplateGroup,
+            onRefreshStorageUsage = viewModel::refreshStorageUsage,
+            onClearFoodTemp = viewModel::clearFoodRecognitionTempFiles,
+            onCompressBodyPhotos = viewModel::compressHistoryBodyPhotos,
+            onArchiveAiText = viewModel::archiveLongAiText,
             onClose = { drawerOpen = false }
         )
         if (state.showProfileOnboarding) {
@@ -770,6 +777,7 @@ private enum class SettingsDialog {
     Api,
     Date,
     Records,
+    Storage,
     Templates
 }
 
@@ -4580,6 +4588,8 @@ private fun SettingsDrawer(
     mealTemplates: List<MealTemplate>,
     mealTemplateGroups: List<MealTemplateGroup>,
     canEditSelectedDate: Boolean,
+    storageUsage: StorageUsage,
+    isManagingStorage: Boolean,
     onApiKeyChange: (String) -> Unit,
     onSaveApiKey: () -> Unit,
     onProfileNameChange: (String) -> Unit,
@@ -4608,6 +4618,10 @@ private fun SettingsDrawer(
     onSaveMealTemplateGroup: (String, String, List<MealItem>) -> Unit,
     onUpdateMealTemplateGroup: (MealTemplateGroup) -> Unit,
     onDeleteMealTemplateGroup: (String) -> Unit,
+    onRefreshStorageUsage: () -> Unit,
+    onClearFoodTemp: () -> Unit,
+    onCompressBodyPhotos: () -> Unit,
+    onArchiveAiText: () -> Unit,
     onClose: () -> Unit
 ) {
     var activeDialog by remember { mutableStateOf<SettingsDialog?>(null) }
@@ -4657,12 +4671,16 @@ private fun SettingsDrawer(
                     SettingsMenuItem(title = "API 设置", subtitle = if (apiKey.isBlank()) "未填写 MiMo API Key" else "已保存 API Key", onClick = { activeDialog = SettingsDialog.Api })
                     SettingsMenuItem(title = "日期选择", subtitle = selectedDate, onClick = { activeDialog = SettingsDialog.Date })
                     SettingsMenuItem(title = "数据模板", subtitle = "训练模板、食物模板", onClick = { activeDialog = SettingsDialog.Templates })
+                    SettingsMenuItem(title = "空间管理", subtitle = "压缩照片、清理临时图片和归档 AI 文本", onClick = { activeDialog = SettingsDialog.Storage })
                     SettingsMenuItem(title = "记录管理", subtitle = "删除某一天的完整记录", onClick = { activeDialog = SettingsDialog.Records })
                 }
             }
         }
     }
     activeDialog?.let { dialog ->
+        LaunchedEffect(dialog) {
+            if (dialog == SettingsDialog.Storage) onRefreshStorageUsage()
+        }
         SettingsCenterDialog(
             title = when (dialog) {
                 SettingsDialog.Profile -> "个人资料"
@@ -4670,6 +4688,7 @@ private fun SettingsDrawer(
                 SettingsDialog.Api -> "API 设置"
                 SettingsDialog.Date -> "日期选择"
                 SettingsDialog.Records -> "记录管理"
+                SettingsDialog.Storage -> "空间管理"
                 SettingsDialog.Templates -> "数据模板"
             },
             subtitle = when (dialog) {
@@ -4678,6 +4697,7 @@ private fun SettingsDrawer(
                 SettingsDialog.Api -> "保存你自己的 MiMo API Key"
                 SettingsDialog.Date -> "查看过去记录，未来日期不可选择"
                 SettingsDialog.Records -> "删除某一天的身体、训练、饮食、照片和 AI 信息"
+                SettingsDialog.Storage -> "控制长期使用后的本地占用"
                 SettingsDialog.Templates -> "管理常用训练和食物记录"
             },
             onDismiss = { activeDialog = null }
@@ -4726,6 +4746,14 @@ private fun SettingsDrawer(
                         onDeleteRecord(date)
                         activeDialog = null
                     }
+                )
+                SettingsDialog.Storage -> StorageManagementPanel(
+                    usage = storageUsage,
+                    busy = isManagingStorage,
+                    onRefresh = onRefreshStorageUsage,
+                    onClearTemp = onClearFoodTemp,
+                    onCompressPhotos = onCompressBodyPhotos,
+                    onArchiveAiText = onArchiveAiText
                 )
                 SettingsDialog.Templates -> DataTemplatesPanel(
                     trainingTemplates = trainingTemplates,
@@ -4961,6 +4989,84 @@ private fun RecordManagementPanel(
             }
         }
     }
+}
+
+@Composable
+private fun StorageManagementPanel(
+    usage: StorageUsage,
+    busy: Boolean,
+    onRefresh: () -> Unit,
+    onClearTemp: () -> Unit,
+    onCompressPhotos: () -> Unit,
+    onArchiveAiText: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        SettingsPanel(
+            title = "本地占用",
+            subtitle = "照片通常是空间增长最快的部分"
+        ) {
+            Text(
+                text = formatStorageBytes(usage.totalBytes),
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Black,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            StorageUsageRow("记录文本", usage.recordsBytes)
+            StorageUsageRow("身材照片", usage.bodyPhotoBytes)
+            StorageUsageRow("临时图片", usage.tempBytes)
+            StorageUsageRow("头像和背景", usage.profileBytes)
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Button(enabled = !busy, onClick = onRefresh) {
+                    Text("刷新")
+                }
+            }
+        }
+        SettingsPanel(
+            title = "推荐清理",
+            subtitle = "不会删除你的训练、饮食和身体数据"
+        ) {
+            SettingsMenuItem(
+                title = "清理食物识别临时图片",
+                subtitle = "删除拍照识别残留的缓存图片",
+                enabled = !busy,
+                onClick = onClearTemp
+            )
+            SettingsMenuItem(
+                title = "压缩历史身材照片",
+                subtitle = "最长边压到 1600px，保留查看和 AI 对比所需质量",
+                enabled = !busy,
+                onClick = onCompressPhotos
+            )
+            SettingsMenuItem(
+                title = "归档历史 AI 长文本",
+                subtitle = "把过长 AI 分析压缩为摘要，保留核心内容",
+                enabled = !busy,
+                onClick = onArchiveAiText
+            )
+            if (busy) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
+@Composable
+private fun StorageUsageRow(label: String, bytes: Long) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(text = label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+        Text(text = formatStorageBytes(bytes), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+    }
+}
+
+private fun formatStorageBytes(bytes: Long): String {
+    if (bytes < 1024L) return "${bytes}B"
+    val kb = bytes / 1024.0
+    if (kb < 1024.0) return "${kb.roundToInt()}KB"
+    val mb = kb / 1024.0
+    if (mb < 1024.0) return "${String.format("%.1f", mb)}MB"
+    val gb = mb / 1024.0
+    return "${String.format("%.2f", gb)}GB"
 }
 
 @Composable

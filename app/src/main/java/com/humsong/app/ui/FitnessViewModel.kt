@@ -12,6 +12,7 @@ import com.humsong.app.fitness.MealItem
 import com.humsong.app.fitness.MealTemplate
 import com.humsong.app.fitness.MealTemplateGroup
 import com.humsong.app.fitness.MealType
+import com.humsong.app.fitness.StorageUsage
 import com.humsong.app.fitness.TrainingGoal
 import com.humsong.app.fitness.TrainingItem
 import com.humsong.app.fitness.TrainingPeriod
@@ -87,6 +88,8 @@ data class FitnessUiState(
     val isRecognizingFoodPhoto: Boolean = false,
     val foodRecognitionSession: FoodRecognitionSession? = null,
     val isComparingPhotos: Boolean = false,
+    val storageUsage: StorageUsage = StorageUsage(),
+    val isManagingStorage: Boolean = false,
     val recordedDates: List<String> = emptyList(),
     val trainingTemplates: List<TrainingTemplate> = emptyList(),
     val trainingTemplateGroups: List<TrainingTemplateGroup> = emptyList(),
@@ -135,6 +138,7 @@ class FitnessViewModel(application: Application) : AndroidViewModel(application)
             trainingTemplateGroups = repository.loadTrainingTemplateGroups(),
             mealTemplates = repository.loadMealTemplates(),
             mealTemplateGroups = repository.loadMealTemplateGroups(),
+            storageUsage = repository.storageUsage(),
             photoComparisonDateOptions = repository.datesWithPhotosBefore(today),
             selectedPhotoComparisonDate = repository.datesWithPhotosBefore(today).firstOrNull().orEmpty(),
             showProfileOnboarding = preferences.getString("profile_name", "").orEmpty().isBlank() ||
@@ -848,6 +852,7 @@ class FitnessViewModel(application: Application) : AndroidViewModel(application)
                     entry = updated,
                     selectedPhotoAngle = angle,
                     recordedDates = repository.recordedDates(),
+                    storageUsage = repository.storageUsage(),
                     photoComparisonDateOptions = repository.datesWithPhotosBefore(current.selectedDate),
                     statusText = "${angle.label} 已保存。",
                     errorMessage = null
@@ -864,9 +869,7 @@ class FitnessViewModel(application: Application) : AndroidViewModel(application)
                 val target = File(directory, "avatar_${UUID.randomUUID()}.jpg")
                 getApplication<Application>().contentResolver.openInputStream(uri).use { input ->
                     requireNotNull(input) { "无法读取选择的头像" }
-                    target.outputStream().use { output ->
-                        input.copyTo(output)
-                    }
+                    repository.writeCompressedImage(input.readBytes(), target)
                 }
                 state.value.profileAvatarPath?.let { oldPath ->
                     val oldFile = File(oldPath)
@@ -875,7 +878,7 @@ class FitnessViewModel(application: Application) : AndroidViewModel(application)
                 target.absolutePath
             }
             preferences.edit().putString("profile_avatar_path", path).apply()
-            _state.update { it.copy(profileAvatarPath = path, statusText = "头像已保存。", errorMessage = null) }
+            _state.update { it.copy(profileAvatarPath = path, storageUsage = repository.storageUsage(), statusText = "头像已保存。", errorMessage = null) }
         }
     }
 
@@ -892,9 +895,7 @@ class FitnessViewModel(application: Application) : AndroidViewModel(application)
                 val target = File(directory, "home_bg_${UUID.randomUUID()}.jpg")
                 getApplication<Application>().contentResolver.openInputStream(uri).use { input ->
                     requireNotNull(input) { "无法读取选择的主页背景" }
-                    target.outputStream().use { output ->
-                        input.copyTo(output)
-                    }
+                    repository.writeCompressedImage(input.readBytes(), target)
                 }
                 state.value.homeBackgroundPath?.let { oldPath ->
                     val oldFile = File(oldPath)
@@ -903,7 +904,7 @@ class FitnessViewModel(application: Application) : AndroidViewModel(application)
                 target.absolutePath
             }
             preferences.edit().putString("home_background_path", path).apply()
-            _state.update { it.copy(homeBackgroundPath = path, statusText = "主页背景已保存。", errorMessage = null) }
+            _state.update { it.copy(homeBackgroundPath = path, storageUsage = repository.storageUsage(), statusText = "主页背景已保存。", errorMessage = null) }
         }
     }
 
@@ -913,7 +914,58 @@ class FitnessViewModel(application: Application) : AndroidViewModel(application)
             if (file.parentFile?.name == "profile") file.delete()
         }
         preferences.edit().remove("home_background_path").remove("welcome_background_path").apply()
-        _state.update { it.copy(homeBackgroundPath = null, statusText = "主页背景已清除。", errorMessage = null) }
+        _state.update { it.copy(homeBackgroundPath = null, storageUsage = repository.storageUsage(), statusText = "主页背景已清除。", errorMessage = null) }
+    }
+
+    fun refreshStorageUsage() {
+        _state.update { it.copy(storageUsage = repository.storageUsage()) }
+    }
+
+    fun clearFoodRecognitionTempFiles() {
+        viewModelScope.launch {
+            _state.update { it.copy(isManagingStorage = true, statusText = "正在清理临时图片...", errorMessage = null) }
+            val result = withContext(Dispatchers.IO) { repository.clearFoodRecognitionTempFiles() }
+            _state.update {
+                it.copy(
+                    storageUsage = repository.storageUsage(),
+                    isManagingStorage = false,
+                    statusText = "已清理 ${result.affectedCount} 个临时文件，释放 ${formatBytes(result.freedBytes)}。",
+                    errorMessage = null
+                )
+            }
+        }
+    }
+
+    fun compressHistoryBodyPhotos() {
+        viewModelScope.launch {
+            _state.update { it.copy(isManagingStorage = true, statusText = "正在压缩历史身材照片...", errorMessage = null) }
+            val result = withContext(Dispatchers.IO) { repository.compressAllBodyPhotos() }
+            _state.update {
+                it.copy(
+                    storageUsage = repository.storageUsage(),
+                    isManagingStorage = false,
+                    statusText = "已处理 ${result.affectedCount} 张照片，释放 ${formatBytes(result.freedBytes)}。",
+                    errorMessage = null
+                )
+            }
+        }
+    }
+
+    fun archiveLongAiText() {
+        viewModelScope.launch {
+            _state.update { it.copy(isManagingStorage = true, statusText = "正在归档历史 AI 长文本...", errorMessage = null) }
+            val result = withContext(Dispatchers.IO) { repository.archiveLongAiText() }
+            val currentDate = state.value.selectedDate
+            _state.update {
+                it.copy(
+                    entry = repository.load(currentDate),
+                    storageUsage = repository.storageUsage(),
+                    isManagingStorage = false,
+                    statusText = "已归档 ${result.affectedCount} 天的 AI 长文本，释放 ${formatBytes(result.freedBytes)}。",
+                    errorMessage = null
+                )
+            }
+        }
     }
 
     fun deleteSelectedPhoto() {
@@ -927,11 +979,12 @@ class FitnessViewModel(application: Application) : AndroidViewModel(application)
         repository.deletePhoto(oldPath)
         val updated = current.entry.withPhotoPath(current.selectedPhotoAngle, null)
         repository.save(updated)
-            _state.update {
-                it.copy(
-                    entry = updated,
-                    recordedDates = repository.recordedDates(),
-                    photoComparisonDateOptions = repository.datesWithPhotosBefore(current.selectedDate),
+        _state.update {
+            it.copy(
+                entry = updated,
+                recordedDates = repository.recordedDates(),
+                storageUsage = repository.storageUsage(),
+                photoComparisonDateOptions = repository.datesWithPhotosBefore(current.selectedDate),
                 statusText = "${current.selectedPhotoAngle.label} 已删除。",
                 errorMessage = null
             )
@@ -1276,6 +1329,16 @@ class FitnessViewModel(application: Application) : AndroidViewModel(application)
                 file.delete()
             }
         }
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        if (bytes < 1024L) return "${bytes}B"
+        val kb = bytes / 1024.0
+        if (kb < 1024.0) return "${kb.roundToInt()}KB"
+        val mb = kb / 1024.0
+        if (mb < 1024.0) return "${String.format("%.1f", mb)}MB"
+        val gb = mb / 1024.0
+        return "${String.format("%.2f", gb)}GB"
     }
 
     private fun String.extractJsonObjectText(): String {

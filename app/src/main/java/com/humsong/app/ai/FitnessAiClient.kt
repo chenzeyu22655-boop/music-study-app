@@ -80,14 +80,15 @@ class FitnessAiClient {
     }
 
     fun recognizeFoodPhoto(
-        photoPath: String,
+        photoPaths: List<String>,
         mealType: MealType,
-        apiKey: String
+        apiKey: String,
+        supplementText: String = ""
     ): String {
         return requestAiWithImages(
             apiKey = apiKey,
-            prompt = buildFoodPhotoPrompt(mealType),
-            imagePaths = listOf(LabeledImagePath("food photo", photoPath)),
+            prompt = buildFoodPhotoPrompt(mealType, supplementText),
+            imagePaths = photoPaths.mapIndexed { index, path -> LabeledImagePath("food photo ${index + 1}", path) },
             maxTokens = 900
         )
     }
@@ -479,10 +480,12 @@ class FitnessAiClient {
         """.trimIndent()
     }
 
-    private fun buildFoodPhotoPrompt(mealType: MealType): String {
+    private fun buildFoodPhotoPrompt(mealType: MealType, supplementText: String): String {
+        val supplement = supplementText.trim().ifBlank { "无" }
         return """
             You are a food photo nutrition logging assistant.
-            Analyze the uploaded meal photo for ${mealType.label}. Identify visible foods and estimate cooked edible grams.
+            Analyze the uploaded meal photo(s) for ${mealType.label}. Identify visible foods and estimate cooked edible grams.
+            User supplemental information: $supplement
 
             Return ONLY one final JSON object in message.content. Do not output markdown, reasoning, explanation, or text outside JSON.
             Required schema:
@@ -498,6 +501,8 @@ class FitnessAiClient {
 
             Rules:
             - Split mixed meals into separate food items when possible.
+            - If several photos are provided, treat the latest photo and supplemental information as corrections or extra context for the same meal, not as a separate meal unless the user says so.
+            - If the user gives a dish name, portion, package size, number of bowls, or missing ingredient in supplemental information, use it to refine grams.
             - Use conservative estimates. If the photo is ambiguous, still return the most likely visible foods with reasonable grams.
             - Use cooked weight for rice, noodles, meat, vegetables and similar foods.
             - If no food can be identified, return {"items":[],"note":"未能识别出明确食物"}.

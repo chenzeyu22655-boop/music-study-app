@@ -201,6 +201,13 @@ fun FitnessApp(
         }
         pendingPhotoAngle = null
     }
+    val foodGalleryPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            viewModel.recognizeFoodImageFromGallery(uri)
+        }
+    }
     val foodCameraLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.TakePicture()
     ) { success: Boolean ->
@@ -378,6 +385,9 @@ fun FitnessApp(
                                     file
                                 )
                                 foodCameraLauncher.launch(uri)
+                            },
+                            onPickFoodPhoto = {
+                                foodGalleryPicker.launch("image/*")
                             }
                         )
                         3 -> PhotoCard(
@@ -529,6 +539,27 @@ fun FitnessApp(
                 onWeightChange = viewModel::updateWeight,
                 onGoalChange = viewModel::updateTrainingGoal,
                 onDone = viewModel::dismissDailyBodyCheckIn
+            )
+        }
+        state.foodRecognitionSession?.let { session ->
+            FoodRecognitionDialog(
+                session = session,
+                isRecognizing = state.isRecognizingFoodPhoto,
+                onSupplementChange = viewModel::updateFoodRecognitionSupplement,
+                onRetry = viewModel::retryFoodRecognitionWithSupplement,
+                onAddPhoto = {
+                    val file = context.createFoodRecognitionImageFile()
+                    pendingFoodPhotoPath = file.absolutePath
+                    val uri = FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        file
+                    )
+                    foodCameraLauncher.launch(uri)
+                },
+                onPickPhoto = { foodGalleryPicker.launch("image/*") },
+                onConfirm = viewModel::confirmFoodRecognitionItems,
+                onDismiss = viewModel::dismissFoodRecognitionSession
             )
         }
         if (exactAlarmPermissionOpen) {
@@ -2502,9 +2533,13 @@ private fun AddSourceDialog(
     aiTitle: String? = null,
     aiSubtitle: String = "",
     aiEnabled: Boolean = true,
+    secondAiTitle: String? = null,
+    secondAiSubtitle: String = "",
+    secondAiEnabled: Boolean = true,
     onManual: () -> Unit,
     onTemplate: () -> Unit,
     onAi: (() -> Unit)? = null,
+    onSecondAi: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     Dialog(onDismissRequest = onDismiss) {
@@ -2533,6 +2568,14 @@ private fun AddSourceDialog(
                         subtitle = aiSubtitle,
                         enabled = aiEnabled,
                         onClick = onAi
+                    )
+                }
+                if (secondAiTitle != null && onSecondAi != null) {
+                    SettingsMenuItem(
+                        title = secondAiTitle,
+                        subtitle = secondAiSubtitle,
+                        enabled = secondAiEnabled,
+                        onClick = onSecondAi
                     )
                 }
             }
@@ -2950,7 +2993,8 @@ private fun MealItemsCard(
     onDeleteItem: (String) -> Unit,
     onAnalyzeNutrition: () -> Unit,
     onAnalyzeMealNutrition: () -> Unit,
-    onRecognizeFoodPhoto: () -> Unit
+    onRecognizeFoodPhoto: () -> Unit,
+    onPickFoodPhoto: () -> Unit
 ) {
     var adding by remember { mutableStateOf(false) }
     val selectedMealType = selectedMealViewType.mealType
@@ -3078,6 +3122,9 @@ private fun MealItemsCard(
             aiTitle = if (isRecognizingFoodPhoto) "AI 正在识别..." else "AI 拍照识别",
             aiSubtitle = "拍一张餐食照片，自动拆成食物和克数",
             aiEnabled = !isRecognizingFoodPhoto && selectedMealType != null,
+            secondAiTitle = "AI 相册识别",
+            secondAiSubtitle = "从相册选择一张食物照片进行识别",
+            secondAiEnabled = !isRecognizingFoodPhoto && selectedMealType != null,
             onManual = {
                 choosingAddSource = false
                 draft = MealItem(id = "draft", type = draftMealType)
@@ -3090,6 +3137,10 @@ private fun MealItemsCard(
             onAi = {
                 choosingAddSource = false
                 onRecognizeFoodPhoto()
+            },
+            onSecondAi = {
+                choosingAddSource = false
+                onPickFoodPhoto()
             },
             onDismiss = { choosingAddSource = false }
         )
@@ -3423,6 +3474,158 @@ private fun MealActionDialog(
                     Spacer(modifier = Modifier.width(8.dp))
                     Button(onClick = onDelete) {
                         Text("删除")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FoodRecognitionDialog(
+    session: FoodRecognitionSession,
+    isRecognizing: Boolean,
+    onSupplementChange: (String) -> Unit,
+    onRetry: () -> Unit,
+    onAddPhoto: () -> Unit,
+    onPickPhoto: () -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        PopDialogSurface {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth(0.94f)
+                    .fillMaxHeight(0.88f)
+                    .padding(18.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(text = "AI 食物识别", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = "${session.mealType.label} · ${session.photoPaths.size} 张照片",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("退出")
+                    }
+                }
+                val latestPhoto = session.photoPaths.lastOrNull()
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(220.dp)
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.54f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (!latestPhoto.isNullOrBlank()) {
+                        Image(
+                            modifier = Modifier.fillMaxSize(),
+                            painter = rememberAsyncImagePainter(File(latestPhoto)),
+                            contentDescription = "待识别食物照片",
+                            contentScale = ContentScale.Crop
+                        )
+                        Box(
+                            modifier = Modifier
+                                .matchParentSize()
+                                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.42f))))
+                        )
+                        Text(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(14.dp),
+                            text = if (isRecognizing) "AI 正在分析这张照片..." else "当前预览照片",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    } else {
+                        Text(text = "还没有选择照片", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                if (isRecognizing) {
+                    SectionCard {
+                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text(text = "正在等待 AI 结果", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            Text(
+                                text = "识别完成后会先给你确认，不会直接写入食物表。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                } else {
+                    SectionCard {
+                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text(text = "识别结果", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            if (session.recognizedItems.isEmpty()) {
+                                EmptyState(
+                                    title = "暂时没有可添加的食物",
+                                    subtitle = session.note.ifBlank { "可以补充说明或再上传一张更清晰的照片继续识别。" }
+                                )
+                            } else {
+                                session.recognizedItems.forEach { item ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.62f))
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = item.foodName.ifBlank { "未命名食物" },
+                                            modifier = Modifier.weight(1f),
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        TextPill(text = "${item.grams.ifBlank { "--" }} g")
+                                    }
+                                }
+                                if (session.note.isNotBlank()) {
+                                    Text(
+                                        text = session.note,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = session.supplementText,
+                    onValueChange = onSupplementChange,
+                    label = { Text("补充信息") },
+                    placeholder = { Text("例如：这是半碗米饭，鸡胸肉大概一掌心，还有少量酱汁") },
+                    minLines = 2
+                )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(modifier = Modifier.weight(1f), enabled = !isRecognizing, onClick = onAddPhoto) {
+                        Text("继续拍照")
+                    }
+                    Button(modifier = Modifier.weight(1f), enabled = !isRecognizing, onClick = onPickPhoto) {
+                        Text("上传相册")
+                    }
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    Button(enabled = !isRecognizing && session.photoPaths.isNotEmpty(), onClick = onRetry) {
+                        Text("继续识别")
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Button(enabled = !isRecognizing && session.recognizedItems.isNotEmpty(), onClick = onConfirm) {
+                        Text("满意，添加到表格")
                     }
                 }
             }

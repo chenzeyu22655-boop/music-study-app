@@ -57,6 +57,15 @@ data class PhotoComparisonResult(
     val analysis: String
 )
 
+data class FoodRecognitionSession(
+    val mealType: MealType,
+    val photoPaths: List<String> = emptyList(),
+    val supplementText: String = "",
+    val rawResponse: String = "",
+    val recognizedItems: List<MealItem> = emptyList(),
+    val note: String = ""
+)
+
 data class FitnessUiState(
     val selectedDate: String = LocalDate.now().toString(),
     val entry: FitnessEntry = FitnessEntry(date = LocalDate.now().toString()),
@@ -76,6 +85,7 @@ data class FitnessUiState(
     val isAnalyzingNutrition: Boolean = false,
     val isAnalyzingMealNutrition: Boolean = false,
     val isRecognizingFoodPhoto: Boolean = false,
+    val foodRecognitionSession: FoodRecognitionSession? = null,
     val isComparingPhotos: Boolean = false,
     val recordedDates: List<String> = emptyList(),
     val trainingTemplates: List<TrainingTemplate> = emptyList(),
@@ -473,7 +483,7 @@ class FitnessViewModel(application: Application) : AndroidViewModel(application)
         _state.update { it.copy(mealTemplates = templates, statusText = "食物模板已保存。", errorMessage = null) }
     }
 
-    fun recognizeFoodPhotoWithAi(photoPath: String) {
+    fun recognizeFoodPhotoWithAi(photoPath: String, supplementText: String = "") {
         val currentState = state.value
         if (!currentState.canEditSelectedDate) {
             File(photoPath).delete()
@@ -492,40 +502,62 @@ class FitnessViewModel(application: Application) : AndroidViewModel(application)
             _state.update { it.copy(errorMessage = "请先切换到早餐、午餐或晚餐，再使用拍照识别。") }
             return
         }
+        val previousSession = currentState.foodRecognitionSession?.takeIf { it.mealType == mealType }
+        val photoPaths = (previousSession?.photoPaths.orEmpty() + photoPath).distinct()
+        val combinedSupplement = supplementText.trim()
+            .ifBlank { previousSession?.supplementText.orEmpty() }
         _state.update {
             it.copy(
                 isRecognizingFoodPhoto = true,
+                foodRecognitionSession = FoodRecognitionSession(
+                    mealType = mealType,
+                    photoPaths = photoPaths,
+                    supplementText = combinedSupplement,
+                    rawResponse = previousSession?.rawResponse.orEmpty(),
+                    recognizedItems = previousSession?.recognizedItems.orEmpty(),
+                    note = previousSession?.note.orEmpty()
+                ),
                 statusText = "AI 正在识别照片里的食物...",
                 errorMessage = null
             )
         }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                runCatching { aiClient.recognizeFoodPhoto(photoPath, mealType, apiKey) }
+                runCatching { aiClient.recognizeFoodPhoto(photoPaths, mealType, apiKey, combinedSupplement) }
             }
-            File(photoPath).delete()
             result.onSuccess { response ->
                 val recognizedItems = parseFoodPhotoItems(response, mealType)
+                val note = parseFoodPhotoNote(response)
                 if (recognizedItems.isEmpty()) {
                     _state.update {
                         it.copy(
                             isRecognizingFoodPhoto = false,
+                            foodRecognitionSession = FoodRecognitionSession(
+                                mealType = mealType,
+                                photoPaths = photoPaths,
+                                supplementText = combinedSupplement,
+                                rawResponse = response,
+                                recognizedItems = emptyList(),
+                                note = note.ifBlank { "没有得到可添加的食物，请补充说明或重新上传照片。" }
+                            ),
                             statusText = "AI 识别完成，但没有得到可添加的食物。",
-                            errorMessage = response.take(1200)
+                            errorMessage = null
                         )
                     }
                     return@onSuccess
                 }
-                val updated = state.value.entry.copy(
-                    mealItems = state.value.entry.mealItems + recognizedItems
-                )
-                repository.save(updated)
                 _state.update {
                     it.copy(
-                        entry = updated,
-                        recordedDates = repository.recordedDates(),
                         isRecognizingFoodPhoto = false,
-                        statusText = "AI 已识别并添加 ${recognizedItems.size} 项食物。",
+                        foodRecognitionSession = FoodRecognitionSession(
+                            mealType = mealType,
+                            photoPaths = photoPaths,
+                            supplementText = combinedSupplement,
+                            rawResponse = response,
+                            recognizedItems = recognizedItems,
+                            note = note
+                        ),
+                        statusText = "AI 已识别 ${recognizedItems.size} 项食物，请确认后添加。",
                         errorMessage = null
                     )
                 }
@@ -533,6 +565,148 @@ class FitnessViewModel(application: Application) : AndroidViewModel(application)
                 _state.update {
                     it.copy(
                         isRecognizingFoodPhoto = false,
+                        foodRecognitionSession = FoodRecognitionSession(
+                            mealType = mealType,
+                            photoPaths = photoPaths,
+                            supplementText = combinedSupplement,
+                            rawResponse = error.message.orEmpty().take(1200),
+                            recognizedItems = previousSession?.recognizedItems.orEmpty(),
+                            note = "识别失败，可以补充信息后重试。"
+                        ),
+                        statusText = "AI 拍照识别失败。",
+                        errorMessage = error.message.orEmpty().take(1200)
+                    )
+                }
+            }
+        }
+    }
+
+    fun updateFoodRecognitionSupplement(value: String) {
+        _state.update {
+            val session = it.foodRecognitionSession ?: return@update it
+            it.copy(foodRecognitionSession = session.copy(supplementText = value))
+        }
+    }
+
+    fun retryFoodRecognitionWithSupplement() {
+        val session = state.value.foodRecognitionSession ?: return
+        if (session.photoPaths.isEmpty()) {
+            _state.update { it.copy(errorMessage = "请先拍照或上传一张食物照片。") }
+            return
+        }
+        runFoodRecognitionSession(session.photoPaths, session.mealType, session.supplementText)
+    }
+
+    fun confirmFoodRecognitionItems() {
+        val current = state.value
+        val session = current.foodRecognitionSession ?: return
+        if (!current.canEditSelectedDate) {
+            _state.update { it.copy(errorMessage = "以前的记录只能查看，不能修改。") }
+            return
+        }
+        if (session.recognizedItems.isEmpty()) {
+            _state.update { it.copy(errorMessage = "当前没有可添加的识别结果。") }
+            return
+        }
+        val normalized = session.recognizedItems.map {
+            it.copy(id = UUID.randomUUID().toString(), type = session.mealType)
+        }
+        val updated = current.entry.copy(mealItems = current.entry.mealItems + normalized)
+        repository.save(updated)
+        _state.update {
+            it.copy(
+                entry = updated,
+                recordedDates = repository.recordedDates(),
+                foodRecognitionSession = null,
+                isRecognizingFoodPhoto = false,
+                statusText = "已添加 ${normalized.size} 项食物。",
+                errorMessage = null
+            )
+        }
+        cleanupFoodRecognitionFiles(session.photoPaths)
+    }
+
+    fun dismissFoodRecognitionSession() {
+        val session = state.value.foodRecognitionSession
+        _state.update { it.copy(foodRecognitionSession = null, isRecognizingFoodPhoto = false) }
+        cleanupFoodRecognitionFiles(session?.photoPaths.orEmpty())
+    }
+
+    private fun runFoodRecognitionSession(
+        photoPaths: List<String>,
+        mealType: MealType,
+        supplementText: String
+    ) {
+        val apiKey = state.value.apiKeyInput.trim()
+        val previousSession = state.value.foodRecognitionSession?.takeIf { it.mealType == mealType }
+        _state.update {
+            it.copy(
+                isRecognizingFoodPhoto = true,
+                foodRecognitionSession = FoodRecognitionSession(
+                    mealType = mealType,
+                    photoPaths = photoPaths.distinct(),
+                    supplementText = supplementText,
+                    rawResponse = previousSession?.rawResponse.orEmpty(),
+                    recognizedItems = previousSession?.recognizedItems.orEmpty(),
+                    note = previousSession?.note.orEmpty()
+                ),
+                statusText = "AI 正在识别照片里的食物...",
+                errorMessage = null
+            )
+        }
+        viewModelScope.launch {
+            val requestPhotoPaths = photoPaths.distinct()
+            val result = withContext(Dispatchers.IO) {
+                runCatching { aiClient.recognizeFoodPhoto(requestPhotoPaths, mealType, apiKey, supplementText) }
+            }
+            result.onSuccess { response ->
+                val recognizedItems = parseFoodPhotoItems(response, mealType)
+                val note = parseFoodPhotoNote(response)
+                if (recognizedItems.isEmpty()) {
+                    _state.update {
+                        it.copy(
+                            isRecognizingFoodPhoto = false,
+                            foodRecognitionSession = FoodRecognitionSession(
+                                mealType = mealType,
+                                photoPaths = requestPhotoPaths,
+                                supplementText = supplementText,
+                                rawResponse = response,
+                                recognizedItems = emptyList(),
+                                note = note.ifBlank { "没有得到可添加的食物，请补充说明或重新上传照片。" }
+                            ),
+                            statusText = "AI 识别完成，但没有得到可添加的食物。",
+                            errorMessage = null
+                        )
+                    }
+                    return@onSuccess
+                }
+                _state.update {
+                    it.copy(
+                        isRecognizingFoodPhoto = false,
+                        foodRecognitionSession = FoodRecognitionSession(
+                            mealType = mealType,
+                            photoPaths = requestPhotoPaths,
+                            supplementText = supplementText,
+                            rawResponse = response,
+                            recognizedItems = recognizedItems,
+                            note = note
+                        ),
+                        statusText = "AI 已识别 ${recognizedItems.size} 项食物，请确认后添加。",
+                        errorMessage = null
+                    )
+                }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        isRecognizingFoodPhoto = false,
+                        foodRecognitionSession = FoodRecognitionSession(
+                            mealType = mealType,
+                            photoPaths = requestPhotoPaths,
+                            supplementText = supplementText,
+                            rawResponse = error.message.orEmpty().take(1200),
+                            recognizedItems = previousSession?.recognizedItems.orEmpty(),
+                            note = "识别失败，可以补充信息后重试。"
+                        ),
                         statusText = "AI 拍照识别失败。",
                         errorMessage = error.message.orEmpty().take(1200)
                     )
@@ -627,6 +801,29 @@ class FitnessViewModel(application: Application) : AndroidViewModel(application)
 
     fun importPhoto(uri: Uri) {
         importPhotoForAngle(state.value.selectedPhotoAngle, uri)
+    }
+
+    fun recognizeFoodImageFromGallery(uri: Uri) {
+        val currentState = state.value
+        if (!currentState.canEditSelectedDate) {
+            _state.update { it.copy(errorMessage = "以前的记录只能查看，不能修改。") }
+            return
+        }
+        viewModelScope.launch {
+            val path = withContext(Dispatchers.IO) {
+                val directory = File(getApplication<Application>().cacheDir, "food_recognition")
+                directory.mkdirs()
+                val target = File(directory, "food_gallery_${UUID.randomUUID()}.jpg")
+                getApplication<Application>().contentResolver.openInputStream(uri).use { input ->
+                    requireNotNull(input) { "无法读取选择的食物照片" }
+                    target.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                target.absolutePath
+            }
+            recognizeFoodPhotoWithAi(path, state.value.foodRecognitionSession?.supplementText.orEmpty())
+        }
     }
 
     fun importPhotoForAngle(angle: BodyPhotoAngle, uri: Uri) {
@@ -1062,6 +1259,23 @@ class FitnessViewModel(application: Application) : AndroidViewModel(application)
             }
         }
         return result
+    }
+
+    private fun parseFoodPhotoNote(response: String): String {
+        val root = runCatching { JSONObject(response.extractJsonObjectText()) }.getOrNull() ?: return ""
+        return root.optString("note")
+            .ifBlank { root.optString("说明") }
+            .ifBlank { root.optString("uncertainty_note") }
+            .trim()
+    }
+
+    private fun cleanupFoodRecognitionFiles(paths: List<String>) {
+        paths.forEach { path ->
+            val file = File(path)
+            if (file.parentFile?.name == "food_recognition") {
+                file.delete()
+            }
+        }
     }
 
     private fun String.extractJsonObjectText(): String {
